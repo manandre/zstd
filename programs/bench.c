@@ -581,20 +581,28 @@ static void BMK_loadFiles(void* buffer, size_t bufferSize,
     if (totalSize == 0) EXM_THROW(12, "no data to bench");
 }
 
+static void BMK_allocateBuffer(void** buffer, size_t bufferSize, size_t* allocatedSize)
+{
+    size_t benchedSize = BMK_findMaxMem(bufferSize * 3) / 3;
+    if ((U64)benchedSize > bufferSize) benchedSize = (size_t)bufferSize;
+    if (benchedSize < bufferSize)
+        DISPLAY("Not enough memory; testing %u MB only...\n", (U32)(benchedSize >> 20));
+    void* srcBuffer = malloc(benchedSize);
+    if (!srcBuffer) EXM_THROW(12, "not enough memory");
+    *buffer = srcBuffer;
+    *allocatedSize = benchedSize;
+}
+
 static void BMK_benchFileTable(const char* const * const fileNamesTable, unsigned const nbFiles,
                                const char* const dictFileName,
                                int const cLevel, int const cLevelLast,
                                const ZSTD_compressionParameters* const compressionParams)
 {
-    void* srcBuffer;
-    size_t benchedSize;
+    void* srcBuffer = NULL;
+    size_t benchedSize = 0;
     void* dictBuffer = NULL;
     size_t dictBufferSize = 0;
-    size_t* const fileSizes = (size_t*)malloc(nbFiles * sizeof(size_t));
-    U64 const totalSizeToLoad = UTIL_getTotalFileSize(fileNamesTable, nbFiles);
-
-    if (!fileSizes) EXM_THROW(12, "not enough memory for fileSizes");
-
+    
     /* Load dictionary */
     if (dictFileName != NULL) {
         U64 const dictFileSize = UTIL_getFileSize(dictFileName);
@@ -605,33 +613,41 @@ static void BMK_benchFileTable(const char* const * const fileNamesTable, unsigne
         if (dictBuffer==NULL)
             EXM_THROW(11, "not enough memory for dictionary (%u bytes)",
                             (U32)dictBufferSize);
+        size_t* const fileSizes = (size_t*)malloc(nbFiles * sizeof(size_t));
         BMK_loadFiles(dictBuffer, dictBufferSize, fileSizes, &dictFileName, 1);
+        free(fileSizes);
     }
-
-    /* Memory allocation & restrictions */
-    benchedSize = BMK_findMaxMem(totalSizeToLoad * 3) / 3;
-    if ((U64)benchedSize > totalSizeToLoad) benchedSize = (size_t)totalSizeToLoad;
-    if (benchedSize < totalSizeToLoad)
-        DISPLAY("Not enough memory; testing %u MB only...\n", (U32)(benchedSize >> 20));
-    srcBuffer = malloc(benchedSize);
-    if (!srcBuffer) EXM_THROW(12, "not enough memory");
-
-    /* Load input buffer */
-    BMK_loadFiles(srcBuffer, benchedSize, fileSizes, fileNamesTable, nbFiles);
 
     /* Bench */
     if (g_separateFiles) {
-        const BYTE* srcPtr = (const BYTE*)srcBuffer;
         U32 fileNb;
         for (fileNb=0; fileNb<nbFiles; fileNb++) {
-            size_t const fileSize = fileSizes[fileNb];
-            BMK_benchCLevel(srcPtr, fileSize,
+            U64 const size = UTIL_getFileSize(fileNamesTable[fileNb]);
+            
+            /* Memory allocation & restrictions */
+            BMK_allocateBuffer(&srcBuffer, size, &benchedSize);
+
+            size_t fileSize = 0;
+            /* Load input buffer */
+            BMK_loadFiles(srcBuffer, benchedSize, &fileSize, fileNamesTable + fileNb, 1);
+
+            BMK_benchCLevel(srcBuffer, fileSize,
                             fileNamesTable[fileNb], cLevel, cLevelLast,
-                            fileSizes+fileNb, 1,
+                            &fileSize, 1,
                             dictBuffer, dictBufferSize, compressionParams);
-            srcPtr += fileSize;
+            free(srcBuffer);
         }
     } else {
+        U64 const totalSizeToLoad = UTIL_getTotalFileSize(fileNamesTable, nbFiles);
+
+        /* Memory allocation & restrictions */
+        BMK_allocateBuffer(&srcBuffer, totalSizeToLoad, &benchedSize);
+
+        size_t* const fileSizes = (size_t*)malloc(nbFiles * sizeof(size_t));
+        if (!fileSizes) EXM_THROW(12, "not enough memory for fileSizes");
+        /* Load input buffer */
+        BMK_loadFiles(srcBuffer, benchedSize, fileSizes, fileNamesTable, nbFiles);
+
         char mfName[20] = {0};
         snprintf (mfName, sizeof(mfName), " %u files", nbFiles);
         {   const char* const displayName = (nbFiles > 1) ? mfName : fileNamesTable[0];
@@ -639,12 +655,13 @@ static void BMK_benchFileTable(const char* const * const fileNamesTable, unsigne
                             displayName, cLevel, cLevelLast,
                             fileSizes, nbFiles,
                             dictBuffer, dictBufferSize, compressionParams);
-    }   }
+        }
+        free(fileSizes);
+        free(srcBuffer);
+    }
 
     /* clean up */
-    free(srcBuffer);
     free(dictBuffer);
-    free(fileSizes);
 }
 
 
